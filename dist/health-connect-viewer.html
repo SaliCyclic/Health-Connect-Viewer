@@ -158,6 +158,11 @@ dialog .switch { display: flex; gap: 8px; align-items: center; font-weight: 600;
 .sqlform { display: grid; gap: 8px; margin-top: 8px; }
 .sqlform input[type=text] { width: 100%; }
 .placeholder { border-style: dashed; }
+.slot { display: contents; }
+.card.ph { min-height: 300px; }
+.card.ph .empty { padding-top: 90px; }
+.mypage:not(.editing):not(.empty-page) .picker-host, .mypage:not(.editing) .wctl { display: none; }
+.mypage:not(.empty-page) .page-empty { display: none; }
 @media print {
   header.top, nav.tabs, .toolbar, .mp-bar, .picker, .wctl, .card-foot button, .card-head select, .map .zoom { display: none !important; }
   body { background: #fff; } main { padding: 0; max-width: none; }
@@ -544,15 +549,28 @@ const h = (tag, attrs = {}, ...kids) => {
   return e;
 };
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const nf = (v, dp = 0) => v == null || !isFinite(v) ? "–" : v.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+// Formatters are created once and reused: building one per value is slow with thousands of values.
+const FMT = new Map();
+const fmt = (key, make) => FMT.get(key) || (FMT.set(key, make()), FMT.get(key));
+const numFmt = (min, max) => fmt(`n${min}.${max}`, () => new Intl.NumberFormat(undefined, { minimumFractionDigits: min, maximumFractionDigits: max }));
+const dateFmt = opts => fmt("d" + JSON.stringify(opts), () => new Intl.DateTimeFormat(undefined, opts));
+const nf = (v, dp = 0) => v == null || !isFinite(v) ? "–" : numFmt(dp, dp).format(v);
 const dayToDate = d => new Date(d * DAY);                       // local-day number → Date read with UTC getters
-const fmtDay = d => dayToDate(d).toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
-const fmtDT = ms => new Date(ms).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtDay = d => dateFmt({ timeZone: "UTC", year: "numeric", month: "short", day: "numeric" }).format(dayToDate(d));
+const fmtDT = ms => dateFmt({ year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
 const fmtDur = ms => { const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
 const sleepTick = () => new Promise(r => setTimeout(r, 20));
+// The export is opened read-only, so a query's answer never changes while the file is open.
+// Remembering answers makes redraws (editing My page, switching tabs or units) nearly free.
+const QCACHE = new Map(), QCACHE_MAX = 600, QCACHE_ROWS = 50000;
+function cacheGet(key) { if (!QCACHE.has(key)) return undefined; const v = QCACHE.get(key); QCACHE.delete(key); QCACHE.set(key, v); return v; }
+function cachePut(key, v, rows) { if (rows > QCACHE_ROWS) return; QCACHE.set(key, v); if (QCACHE.size > QCACHE_MAX) QCACHE.delete(QCACHE.keys().next().value); }
 function q(sql, params) {
+  const key = sql + "\u0001" + (params ? JSON.stringify(params) : "");
+  const hit = cacheGet(key); if (hit) return hit;
   const st = S.db.prepare(sql); const out = [];
   try { if (params) st.bind(params); while (st.step()) out.push(st.get()); } finally { st.free(); }
+  cachePut(key, out, out.length);
   return out;
 }
 function cols(table) { return S.tables.get(table)?.cols || []; }
@@ -613,6 +631,7 @@ async function openFile(file) {
     S.db = new SQL.Database(bytes);
     bytes = null;
     st.textContent = "Indexing tables…"; await sleepTick();
+    QCACHE.clear(); S.hrDaily = null;
     scanSchema(); buildWidgets();
     $("#fileinfo").textContent = file.name; $("#fileinfo").classList.remove("hidden");
     $("#openOther").classList.remove("hidden");
@@ -737,12 +756,46 @@ function render() {
   if (S.tab === "tables") return renderTables(v);
   if (S.tab === "mypage") return renderMyPage(v);
   const grid = h("div", { class: "grid" }); v.append(grid);
+  const slots = [];
   for (const id of WIDGET_ORDER) {
     const w = WIDGETS[id]; if (w.sec !== S.tab || !w.avail()) continue;
-    for (const c of makeWidget(id)) grid.append(c);
+    slots.push(slot(grid, w.name, () => makeWidget(id), w.wide));
   }
-  if (!grid.children.length) grid.append(h("div", { class: "empty" }, "No data of this kind in the export."));
+  if (!slots.length) grid.append(h("div", { class: "empty" }, "No data of this kind in the export."));
+  mount(slots);
 }
+
+// A slot holds one widget. It shows a light placeholder at once and is filled in later,
+// a few at a time, so the page appears immediately and stays responsive while charts draw.
+function slot(parent, title, build, wide, before = null) {
+  const wrap = h("div", { class: "slot" });
+  wrap.append(h("div", { class: "card ph" + (wide ? " wide" : ""), "data-pending": "" },
+    h("div", { class: "card-head" }, h("h3", {}, title)), h("div", { class: "empty" }, "Loading…")));
+  parent.insertBefore(wrap, before);
+  return { wrap, build, done: false };
+}
+function fill(s) {
+  if (s.done || !s.wrap.isConnected) return;
+  s.done = true;
+  let els;
+  try { els = s.build().filter(Boolean); }
+  catch (e) { console.error(e); els = [h("div", { class: "card" }, h("div", { class: "status err" }, "Couldn't draw this: " + e.message))]; }
+  s.wrap.replaceChildren(...els);
+}
+let mountTok = 0, pendingSlots = [];
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+async function mount(slots) {
+  const tok = ++mountTok; pendingSlots = slots;
+  await nextFrame();                      // let the placeholders paint first
+  let t0 = performance.now();
+  for (const s of slots) {
+    if (tok !== mountTok) return;         // a newer render replaced this page
+    fill(s);
+    if (performance.now() - t0 > 30) { await nextFrame(); t0 = performance.now(); }
+  }
+}
+function flushSlots() { for (const s of pendingSlots) fill(s); }
+window.addEventListener("beforeprint", flushSlots);
 
 // Every chart/table is a widget, so the section tabs and "My page" share one registry.
 let WIDGETS = {}, WIDGET_ORDER = [];
@@ -773,15 +826,16 @@ function cardShell(title, sub, selectEl) {
   card.append(h("div", { class: "card-head" }, h("div", {}, h("h3", {}, title), sub ? h("div", { class: "sub" }, sub) : null), h("span", { class: "spacer" }), selectEl));
   return card;
 }
-function footer(card, csvName, header, rows, note) {
+function footer(card, csvName, header, rowsOrFn, note) {
+  let rows = null; const getRows = () => rows || (rows = typeof rowsOrFn === "function" ? rowsOrFn() : rowsOrFn);
   const f = h("div", { class: "card-foot" });
   f.append(h("span", { class: "src", title: note || "" }, note || ""));
   const tableBox = h("div", { class: "hidden scroll", style: "margin-top:8px;max-height:260px" });
   const tbtn = h("button", { onclick: () => { tableBox.classList.toggle("hidden"); tbtn.textContent = tableBox.classList.contains("hidden") ? "Table" : "Hide table";
-      if (!tableBox.firstChild) tableBox.append(simpleTable(header, rows.slice().reverse())); } }, "Table");
+      if (!tableBox.firstChild) tableBox.append(simpleTable(header, getRows().slice().reverse())); } }, "Table");
   card._showTable = () => { if (tableBox.classList.contains("hidden")) tbtn.click(); };
   f.append(tbtn,
-    h("button", { onclick: () => download(csvName, [header.join(",") + "\n", ...rows.map(r => r.map(csvCell).join(",") + "\n")]) }, "CSV"));
+    h("button", { onclick: () => download(csvName, [header.join(",") + "\n", ...getRows().map(r => r.map(csvCell).join(",") + "\n")]) }, "CSV"));
   card.append(f, tableBox);
 }
 function simpleTable(header, rows) {
@@ -834,10 +888,22 @@ function hrCard(m) {
   const tCol = hasCol(Sx, "epoch_millis") ? "epoch_millis" : "time";
   const bCol = hasCol(Sx, "beats_per_minute") ? "beats_per_minute" : "bpm";
   if (!hasCol(Sx, tCol) || !hasCol(Sx, bCol)) return null;
-  const dayExpr = `CAST((s.${tCol} + ${offExpr(P, "start_zone_offset", "p")}) / ${DAY} AS INTEGER)`;
-  const daily = q(`SELECT ${dayExpr} d, min(s.${bCol}), avg(s.${bCol}), max(s.${bCol}), count(*) FROM ${Sx} s JOIN ${P} p ON s.parent_key = p.row_id
-     WHERE s.${tCol} BETWEEN ${S.from} AND ${S.to} AND s.${bCol} > 0 ${srcClause("hr", "p")} GROUP BY d HAVING d BETWEEN ${S.fromDay} AND ${S.toDay} ORDER BY d`)
-    .map(([day, lo, v, hi, n]) => ({ day, lo, v, hi, n }));
+  // Heart-rate samples are by far the biggest table, so they are summarised per day and source
+  // once (one pass over every sample) and each range or source change just slices that summary.
+  if (!S.hrDaily) {
+    const dayExpr = `CAST((s.${tCol} + ${offExpr(P, "start_zone_offset", "p")}) / ${DAY} AS INTEGER)`;
+    S.hrDaily = q(`SELECT ${dayExpr} d, p.app_info_id, min(s.${bCol}), sum(s.${bCol}), max(s.${bCol}), count(*) FROM ${Sx} s JOIN ${P} p ON s.parent_key = p.row_id
+       WHERE s.${bCol} > 0 GROUP BY d, p.app_info_id ORDER BY d`);
+  }
+  const src = S.sources.hr && S.sources.hr !== "all" ? Number(S.sources.hr) : null;
+  const byDay = new Map();
+  for (const [day, app, lo, sum, hi, n] of S.hrDaily) {
+    if (day < S.fromDay || day > S.toDay || (src != null && app !== src)) continue;
+    const o = byDay.get(day);
+    if (!o) byDay.set(day, { day, lo, hi, sum, n });
+    else { o.lo = Math.min(o.lo, lo); o.hi = Math.max(o.hi, hi); o.sum += sum; o.n += n; }
+  }
+  const daily = [...byDay.values()].map(o => ({ day: o.day, lo: o.lo, v: o.sum / o.n, hi: o.hi, n: o.n }));
   const { rows, b } = bucketize(daily, ["lo", "v", "hi"]);
   const card = cardShell("Heart rate", `bpm · ${b.size > 1 ? b.name + "ly " : "daily "}average with low–high band`, sel);
   card.classList.add("wide");
@@ -870,8 +936,8 @@ function bpCard(m) {
   const chart = h("div", { class: "chart" }); card.append(chart);
   drawChart(chart, { type: "line", days: rows.map(r => r.day), bucket: b, unit: "mmHg", dp: 0,
     series: [{ name: "Systolic", values: rows.map(r => r.sys), color: "--s1" }, { name: "Diastolic", values: rows.map(r => r.dia), color: "--s2" }] });
-  const raw = q(`SELECT time, systolic, diastolic, app_info_id FROM ${T} WHERE time BETWEEN ${S.from} AND ${S.to} ${srcClause("bp")} ORDER BY time`);
-  footer(card, "blood_pressure_readings.csv", ["time", "systolic", "diastolic", "source"], raw.map(r => [fmtDT(r[0]), +(+r[1]).toFixed(0), +(+r[2]).toFixed(0), appName(r[3])]), T);
+  const rawSql = `SELECT time, systolic, diastolic, app_info_id FROM ${T} WHERE time BETWEEN ${S.from} AND ${S.to} ${srcClause("bp")} ORDER BY time`;
+  footer(card, "blood_pressure_readings.csv", ["time", "systolic", "diastolic", "source"], () => q(rawSql).map(r => [fmtDT(r[0]), +(+r[1]).toFixed(0), +(+r[2]).toFixed(0), appName(r[3])]), T);
   return card;
 }
 
@@ -924,7 +990,7 @@ function sleepStagesCard(d) {
   drawChart(chart, { type: "stack", days: rows.map(r => r.day), bucket: b, unit: "h", dp: 1, height: 240,
     series: groups.map(g => ({ name: g.name, values: rows.map(r => r[g.key]), color: g.color })) });
   footer(card, "sleep_nights.csv", ["night_ending", "bed", "wake", "asleep_h", ...SLEEP_GROUPS.map(g => g.name.toLowerCase().replace(/\W+/g, "_") + "_h"), "sessions"],
-    rowsD.map(r => [dayToDate(r.day).toISOString().slice(0, 10), fmtDT(r.start), fmtDT(r.end), +r.asleep.toFixed(2), ...SLEEP_GROUPS.map(g => +r[g.key].toFixed(2)), r.n]),
+    () => rowsD.map(r => [dayToDate(r.day).toISOString().slice(0, 10), fmtDT(r.start), fmtDT(r.end), +r.asleep.toFixed(2), ...SLEEP_GROUPS.map(g => +r[g.key].toFixed(2)), r.n]),
     `${SLEEP_T}${d.hasStageTable ? " + sleep_stages_table" : ""}`);
   return card;
 }
@@ -996,7 +1062,7 @@ function workoutDetail(card, r) {
   const [id, st, en, type, title, , app] = r;
   card.innerHTML = ""; card.classList.remove("hidden");
   card.append(h("div", { class: "card-head" }, h("div", {}, h("h3", {}, `${EXERCISE[type] || "Workout"}${title ? " · " + title : ""}`),
-    h("div", { class: "sub" }, `${fmtDT(st)} – ${new Date(en).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })} · ${appName(app)}`))));
+    h("div", { class: "sub" }, `${fmtDT(st)} – ${dateFmt({ hour: "2-digit", minute: "2-digit" }).format(new Date(en))} · ${appName(app)}`))));
   // heart rate during the session (any source)
   let hr = [];
   if (has("heart_rate_record_series_table") && hasCol("heart_rate_record_series_table", "epoch_millis"))
@@ -1134,31 +1200,49 @@ SELECT date((time + zone_offset * 1000) / 1000, 'unixepoch') AS day,
 FROM weight_record_table
 WHERE time BETWEEN :from AND :to
 GROUP BY day`;
-function pageItems() { if (!S.page) S.page = store.get("page", DEFAULT_PAGE); return S.page; }
-function savePage(items) { S.page = items; store.set("page", items); }
+const newKey = () => Math.random().toString(36).slice(2, 10);
+function pageItems() {
+  if (!S.page) S.page = store.get("page", DEFAULT_PAGE);
+  for (const it of S.page) if (!it.key) it.key = newKey();
+  return S.page;
+}
+function savePage(items) { S.page = items; store.set("page", items.map(({ isNew, ...it }) => it)); }
+let MP = null;   // the My page elements currently on screen
 function renderMyPage(v) {
   const items = pageItems();
-  const bar = h("div", { class: "mp-bar" }, h("h2", {}, "My page"),
-    h("button", { class: S.editing ? "primary" : "", onclick: () => { S.editing = !S.editing; render(); } }, S.editing ? "Done" : "Edit page"),
-    h("span", { class: "spacer" }),
-    h("button", { title: "Save the page layout (no health data) as a file", onclick: () => download("my-page-layout.json", JSON.stringify(items, null, 2), "application/json") }, "Export layout"),
+  const root = h("div", { class: "mypage" + (S.editing ? " editing" : "") + (items.length ? "" : " empty-page") });
+  const editBtn = h("button", { class: S.editing ? "primary" : "", onclick: () => {
+    S.editing = !S.editing; root.classList.toggle("editing", S.editing);
+    editBtn.textContent = S.editing ? "Done" : "Edit page"; editBtn.className = S.editing ? "primary" : ""; } }, S.editing ? "Done" : "Edit page");
+  const bar = h("div", { class: "mp-bar" }, h("h2", {}, "My page"), editBtn, h("span", { class: "spacer" }),
+    h("button", { title: "Save the page layout (no health data) as a file", onclick: () => download("my-page-layout.json", JSON.stringify(pageItems().map(({ key, isNew, ...it }) => it), null, 2), "application/json") }, "Export layout"),
     h("button", { onclick: importLayout }, "Import layout"),
-    h("button", { onclick: () => window.print() }, "Print / PDF"));
-  v.append(bar);
-  if (S.editing || !items.length) v.append(picker(items));
-  const grid = h("div", { class: "grid" }); v.append(grid);
-  if (!items.length) grid.append(h("div", { class: "empty" }, "Your page is empty. Pick charts and tables above to add them."));
-  items.forEach((it, i) => {
-    let cards = makeWidget(it.id, it);
-    const name = widgetName(it);
-    if (!cards.length) { const c = cardShell(name, "not in this export", null); c.classList.add("placeholder"); c.append(h("div", { class: "empty" }, "This export has no data for this item.")); cards = [c]; }
-    const first = cards[0];
-    if (it.size === "wide") cards.forEach(c => c.classList.add("wide")); else if (it.size === "normal") cards.forEach(c => c.classList.remove("wide"));
-    applyView(first, it.view || "chart");
-    if (S.editing) first.prepend(widgetControls(items, i, first));
-    cards.forEach(c => grid.append(c));
-  });
+    h("button", { onclick: () => { flushSlots(); setTimeout(() => window.print(), 50); } }, "Print / PDF"));
+  const pick = h("div", { class: "picker-host" });
+  const grid = h("div", { class: "grid" });
+  const emptyMsg = h("div", { class: "empty page-empty" }, "Your page is empty. Pick charts and tables above to add them.");
+  root.append(bar, pick, grid, emptyMsg); v.append(root);
+  MP = { root, grid, pick };
+  refreshPicker();
+  mount(items.map(it => itemSlot(it)));
 }
+function itemWide(it) { return it.size === "wide" || (it.size !== "normal" && !!WIDGETS[it.id]?.wide) || it.id.startsWith("tbl:"); }
+function itemSlot(it, before = null) {
+  const s = slot(MP.grid, widgetName(it), () => buildItem(it.key), itemWide(it), before);
+  s.wrap.dataset.key = it.key;
+  return s;
+}
+function buildItem(key) {
+  const it = pageItems().find(x => x.key === key); if (!it) return [];
+  let cards = makeWidget(it.id, it);
+  if (!cards.length) { const c = cardShell(widgetName(it), "not in this export", null); c.classList.add("placeholder"); c.append(h("div", { class: "empty" }, "This export has no data for this item.")); cards = [c]; }
+  if (it.size === "wide") cards.forEach(c => c.classList.add("wide")); else if (it.size === "normal") cards.forEach(c => c.classList.remove("wide"));
+  applyView(cards[0], it.view || "chart");
+  cards[0].prepend(widgetControls(it, cards[0]));
+  return cards;
+}
+const wrapOf = key => MP.grid.querySelector(`:scope > .slot[data-key="${key}"]`);
+function redrawItem(key) { const w = wrapOf(key); if (w) fill({ wrap: w, build: () => buildItem(key) }); }
 function widgetName(it) {
   if (it.id.startsWith("tbl:")) return "Table: " + it.id.slice(4);
   if (it.id.startsWith("sql:")) return it.title || "Custom query";
@@ -1168,44 +1252,64 @@ function applyView(card, view) {
   if (view === "chart") return;
   if (view === "table" || view === "both") { card._showTable?.(); if (view === "table") card.querySelectorAll(":scope > .chart").forEach(c => c.classList.add("hidden")); }
 }
-function widgetControls(items, i, card) {
-  const it = items[i];
-  const upd = patch => { const n = items.slice(); n[i] = { ...it, ...patch }; savePage(n); render(); };
-  const move = d => { const n = items.slice(); const j = i + d; if (j < 0 || j >= n.length) return; [n[i], n[j]] = [n[j], n[i]]; savePage(n); render(); };
-  const size = h("select", { title: "Width", onchange: e => upd({ size: e.target.value }) }, h("option", { value: "auto" }, "Auto width"), h("option", { value: "normal" }, "Narrow"), h("option", { value: "wide" }, "Full width"));
+function widgetControls(it, card) {
+  const key = it.key;
+  const idx = () => pageItems().findIndex(x => x.key === key);
+  const patch = p => { const items = pageItems().slice(); const i = idx(); items[i] = { ...items[i], ...p }; savePage(items); return items[i]; };
+  const move = d => {
+    const items = pageItems().slice(), i = idx(), j = i + d; if (i < 0 || j < 0 || j >= items.length) return;
+    const other = items[j].key; [items[i], items[j]] = [items[j], items[i]]; savePage(items);
+    const a = wrapOf(key), b = wrapOf(other); if (!a || !b) return;
+    if (d < 0) MP.grid.insertBefore(a, b); else MP.grid.insertBefore(b, a);
+    a.scrollIntoView({ block: "nearest" });
+  };
+  const size = h("select", { title: "Width", onchange: e => {
+      const it2 = patch({ size: e.target.value }); const w = wrapOf(key);
+      if (w) for (const c of w.children) c.classList.toggle("wide", itemWide(it2));   // charts redraw themselves on resize
+    } }, h("option", { value: "auto" }, "Auto width"), h("option", { value: "normal" }, "Narrow"), h("option", { value: "wide" }, "Full width"));
   size.value = it.size || "auto";
   const ctl = h("div", { class: "wctl" }, h("span", { class: "nm" }, widgetName(it)));
   if (card._showTable && !it.id.startsWith("sql:")) {
-    const view = h("select", { title: "Show", onchange: e => upd({ view: e.target.value }) }, h("option", { value: "chart" }, "Chart"), h("option", { value: "table" }, "Table"), h("option", { value: "both" }, "Chart + table"));
+    const view = h("select", { title: "Show", onchange: e => { patch({ view: e.target.value }); redrawItem(key); } },
+      h("option", { value: "chart" }, "Chart"), h("option", { value: "table" }, "Table"), h("option", { value: "both" }, "Chart + table"));
     view.value = it.view || "chart"; ctl.append(view);
   }
   if (it.id.startsWith("sql:")) ctl.append(h("button", { onclick: () => card.querySelector(".sqlform")?.classList.toggle("hidden") }, "Edit query"));
   ctl.append(size, h("button", { title: "Move earlier", onclick: () => move(-1) }, "↑"), h("button", { title: "Move later", onclick: () => move(1) }, "↓"),
-    h("button", { title: "Remove", onclick: () => { savePage(items.filter((_, k) => k !== i)); render(); } }, "✕"));
+    h("button", { title: "Remove", onclick: () => {
+      const items = pageItems().filter(x => x.key !== key); savePage(items); wrapOf(key)?.remove();
+      MP.root.classList.toggle("empty-page", !items.length); refreshPicker(); } }, "✕"));
   return ctl;
 }
-function picker(items) {
-  const have = new Set(items.map(x => x.id));
-  const add = item => { savePage([...pageItems(), item]); render(); };
+function addItem(item) {
+  const it = { ...item, key: newKey(), isNew: item.id.startsWith("sql:") || undefined };
+  savePage([...pageItems(), it]);
+  if (!MP || !MP.root.isConnected) return;
+  MP.root.classList.remove("empty-page");
+  const s = itemSlot(it); fill(s); refreshPicker();
+  s.wrap.firstElementChild?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+function refreshPicker() {
+  const items = pageItems(), have = new Set(items.map(x => x.id));
   const box = h("div", { class: "picker" });
   for (const sec of SECTIONS.filter(s => !["mypage", "tables"].includes(s.id))) {
     const ws = WIDGET_ORDER.filter(id => WIDGETS[id].sec === sec.id && WIDGETS[id].avail());
     if (!ws.length) continue;
     box.append(h("h4", {}, sec.name), h("div", { class: "chips" }, ws.map(id => h("button", { class: have.has(id) ? "on" : "", title: have.has(id) ? "Already on your page (click to add another copy)" : "Add to page",
-      onclick: () => add({ id }) }, (have.has(id) ? "✓ " : "+ ") + WIDGETS[id].name))));
+      onclick: () => addItem({ id }) }, (have.has(id) ? "✓ " : "+ ") + WIDGETS[id].name))));
   }
   const tsel = h("select", {}, h("option", { value: "" }, "Choose a database table…"),
     [...S.tables.keys()].sort().map(n => h("option", { value: n }, n)));
-  box.append(h("h4", {}, "Raw data"), h("div", { class: "chips" }, tsel, h("button", { onclick: () => tsel.value && add({ id: "tbl:" + tsel.value }) }, "+ Add table"),
-    h("button", { onclick: () => add({ id: "sql:" + Math.random().toString(36).slice(2, 9), title: "Weight (custom query)", sql: SQL_EXAMPLE, chart: "line" }) }, "+ Custom SQL chart or table")));
-  return box;
+  box.append(h("h4", {}, "Raw data"), h("div", { class: "chips" }, tsel, h("button", { onclick: () => tsel.value && addItem({ id: "tbl:" + tsel.value }) }, "+ Add table"),
+    h("button", { onclick: () => addItem({ id: "sql:" + newKey(), title: "Weight (custom query)", sql: SQL_EXAMPLE, chart: "line" }) }, "+ Custom SQL chart or table")));
+  MP.pick.replaceChildren(box);
 }
 function importLayout() {
   const inp = h("input", { type: "file", accept: ".json,application/json" });
   inp.onchange = async () => {
     try { const arr = JSON.parse(await inp.files[0].text());
       if (!Array.isArray(arr) || !arr.every(x => x && typeof x.id === "string")) throw new Error("Not a layout file");
-      savePage(arr.map(x => ({ id: x.id, view: x.view, size: x.size, title: x.title, sql: x.sql, chart: x.chart }))); render();
+      savePage(arr.map(x => ({ id: x.id, view: x.view, size: x.size, title: x.title, sql: x.sql, chart: x.chart, key: newKey() }))); render();
     } catch (e) { alert("Couldn't import: " + e.message); }
   };
   inp.click();
@@ -1214,8 +1318,8 @@ function tableCard(name) {
   if (!has(name)) return null;
   const card = cardShell(name, `${(q(`SELECT count(*) FROM "${name}"`)[0][0]).toLocaleString()} rows · newest first, up to 200 shown`, null);
   card.classList.add("wide");
-  const tc = timeCols(name);
-  const order = tc ? `ORDER BY ${tc.t} DESC` : hasCol(name, "epoch_millis") ? "ORDER BY epoch_millis DESC" : "";
+  // rows are stored in the order they were written, so row order is effectively time order and needs no sort
+  const order = hasCol(name, "row_id") ? "ORDER BY row_id DESC" : "ORDER BY rowid DESC";
   let res;
   try { res = runQuery(`SELECT * FROM "${name}" ${order} LIMIT 200`); } catch (e) { card.append(h("div", { class: "status err" }, e.message)); return card; }
   card.append(h("div", { class: "scroll", style: "max-height:320px" }, simpleTable(res.cols, res.rows.map(r => r.map((v, i) => fmtCell(res.cols[i], v, true))))));
@@ -1225,14 +1329,15 @@ function tableCard(name) {
 }
 function sqlCard(it) {
   const card = cardShell(it.title || "Custom query", "your SQL · uses the range above via :from / :to", null);
-  const form = h("div", { class: "sqlform" + (S.editing && !it._saved ? "" : " hidden") });
+  const form = h("div", { class: "sqlform" + (it.isNew ? "" : " hidden") });
   const title = h("input", { type: "text", value: it.title || "", placeholder: "Title" });
   const ta = h("textarea", { spellcheck: "false" }, it.sql || "");
   const mode = h("select", {}, ["table", "line", "bar", "dots"].map(x => h("option", { value: x }, { table: "Show as table", line: "Line chart", bar: "Bar chart", dots: "Scatter + average line" }[x])));
   mode.value = it.chart || "table";
   form.append(title, ta, h("div", { class: "card-foot" }, mode, h("span", { class: "note" }, "For charts: first column = date (YYYY-MM-DD) or time in ms; the next columns = numbers (up to 5)."),
     h("span", { class: "spacer" }), h("button", { class: "primary", onclick: () => {
-      const items = pageItems().map(x => x.id === it.id ? { ...x, title: title.value.trim(), sql: ta.value, chart: mode.value } : x); savePage(items); render(); } }, "Save")));
+      const items = pageItems().map(x => x.key === it.key ? { ...x, title: title.value.trim(), sql: ta.value, chart: mode.value, isNew: undefined } : x);
+      savePage(items); redrawItem(it.key); } }, "Save")));
   card.append(form);
   const out = h("div"); card.append(out);
   let res;
@@ -1286,6 +1391,11 @@ function checkReadOnly(text) {
 }
 function runQuery(text, withParams, limit = 1000) {
   const t = checkReadOnly(text);
+  const key = "run\u0001" + t + "\u0001" + (withParams ? JSON.stringify(rangeParams(t)) : "") + "\u0001" + limit;
+  const hit = cacheGet(key); if (hit) return hit;
+  const res = runQueryUncached(t, withParams, limit); cachePut(key, res, res.rows.length); return res;
+}
+function runQueryUncached(t, withParams, limit) {
   const st = S.db.prepare(t);
   try {
     const p = withParams ? rangeParams(t) : null; if (p) st.bind(p);
@@ -1330,7 +1440,7 @@ function renderTables(v) {
   sqlCard.append(sql, h("div", { class: "card-foot" }, h("button", { class: "primary", onclick: () => run() }, "Run"),
     h("label", {}, human, " Show times as dates"), h("span", { class: "spacer" }),
     h("button", { onclick: () => exportCsv() }, "Download result as CSV"),
-    h("button", { title: "Add this query to My page", onclick: () => { savePage([...pageItems(), { id: "sql:" + Math.random().toString(36).slice(2, 9), title: "Custom query", sql: sql.value, chart: "table" }]);
+    h("button", { title: "Add this query to My page", onclick: () => { addItem({ id: "sql:" + newKey(), title: "Custom query", sql: sql.value, chart: "table" });
       S.tab = "mypage"; buildChrome(); render(); } }, "Add to My page")), out);
   sql.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
   human.addEventListener("change", () => run());
@@ -1397,14 +1507,14 @@ function dateTicks(days, b, maxTicks) {
 }
 function tickLabel(d, span) {
   const dt = dayToDate(d);
-  if (span > 500) return dt.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: dt.getUTCMonth() ? "short" : undefined });
-  if (span > 60) return dt.toLocaleDateString(undefined, { timeZone: "UTC", month: "short", year: dt.getUTCMonth() === 0 ? "numeric" : undefined });
-  return dt.toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" });
+  if (span > 500) return dt.getUTCMonth() ? dateFmt({ timeZone: "UTC", year: "numeric", month: "short" }).format(dt) : dateFmt({ timeZone: "UTC", year: "numeric" }).format(dt);
+  if (span > 60) return dateFmt(dt.getUTCMonth() === 0 ? { timeZone: "UTC", month: "short", year: "numeric" } : { timeZone: "UTC", month: "short" }).format(dt);
+  return dateFmt({ timeZone: "UTC", month: "short", day: "numeric" }).format(dt);
 }
 function bucketLabel(d, b) {
   if (b.size === 1) return fmtDay(d);
   if (b.size === 7) return "Week of " + fmtDay(d);
-  return dayToDate(d).toLocaleDateString(undefined, { timeZone: "UTC", month: "long", year: "numeric" });
+  return dateFmt({ timeZone: "UTC", month: "long", year: "numeric" }).format(dayToDate(d));
 }
 
 function drawChart(el, o) {
@@ -1525,7 +1635,7 @@ function barPath(x, y, w, hgt, r, fill) {
   r = Math.min(r, w / 2, hgt);
   return `<path d="M${x},${y + hgt}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + hgt}Z" fill="${fill}"/>`;
 }
-const compact = v => Math.abs(v) >= 10000 ? (v / 1000).toLocaleString(undefined, { maximumFractionDigits: 0 }) + "k" : Math.abs(v) >= 1000 ? (v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + "k" : v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+const compact = v => Math.abs(v) >= 10000 ? numFmt(0, 0).format(v / 1000) + "k" : Math.abs(v) >= 1000 ? numFmt(0, 1).format(v / 1000) + "k" : numFmt(0, 2).format(v);
 // within-session time series
 function drawTimeLine(el, ts, vals, unit) {
   const st = ts[0];

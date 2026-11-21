@@ -1,6 +1,11 @@
 """Builds a synthetic Health Connect export (health_connect_export.db inside a zip)
 using the table/column names from AOSP HealthFitness. Values are random."""
-import sqlite3, random, math, zipfile, os, uuid, time
+import sqlite3, random, math, zipfile, os, uuid, time, argparse
+
+ap = argparse.ArgumentParser(description="Write a random Health Connect-style export to tests/out/")
+ap.add_argument("--days", type=int, default=420, help="days of history (default 420)")
+ap.add_argument("--hr-minutes", type=int, default=5, help="minutes between heart-rate samples (default 5)")
+ARGS = ap.parse_args()
 
 random.seed(4)
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
@@ -54,7 +59,7 @@ TZ = -4 * 3600  # Halifax, seconds
 DAY = 86400000
 now = int(time.time() * 1000)
 today0 = (now + TZ * 1000) // DAY * DAY - TZ * 1000
-N = 420
+N = ARGS.days
 
 def ins(table, cols, vals):
     q = ",".join("?" * len(vals))
@@ -92,7 +97,7 @@ for d in range(N, -1, -1):
     # heart rate: one record per day, sample every 5 minutes
     hr_id = ins("heart_rate_record_table", base_i, [uuid.uuid4().bytes, day0, 3, day0, TZ, day0 + DAY - 1, TZ])
     rows = []
-    for m in range(0, 1440, 5):
+    for m in range(0, 1440, ARGS.hr_minutes):
         tod = m / 60
         bpm = 58 + 12 * math.sin((tod - 9) / 24 * 2 * math.pi) + (25 if 17 <= tod < 18 and not weekend else 0) + random.gauss(0, 4)
         if tod < 6: bpm -= 6

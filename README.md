@@ -10,7 +10,7 @@ An offline dashboard for your Android **Health Connect** export. It's a single H
 
 ## Download and use
 
-1. **Get the viewer.** Download [`dist/health-connect-viewer.html`](dist/health-connect-viewer.html) (on that page, use the "Download raw file" button). That one file is the whole app.
+1. **Get the viewer.** Either open the online copy at **https://salicyclic.github.io/Health-Connect-Viewer/**, or download [`dist/health-connect-viewer.html`](dist/health-connect-viewer.html) (on that page, use the "Download raw file" button) and open it from your computer. That one file is the whole app. Both versions read your export inside your browser; the online copy only serves the page and never receives your data.
 2. **Export your data from your phone** (Android 14 or newer):
    Settings → search **Health Connect** → **Manage data** → **Backup and restore** → **Scheduled export**.
    Pick a cloud storage location and a schedule. There's no "export now" button, so wait for the first export to run, then download `Health Connect.zip` to your computer.
@@ -48,7 +48,7 @@ Every chart has hover tooltips, a table view, and CSV download. Other features:
 - With **Maps** on, the browser downloads map images for the workout route you're looking at. Those requests tell the map provider which area the route covers, along with your IP address. No health data is sent. Choose the provider in the Maps dialog:
   - **OpenTopoMap:** the default. Free, no key needed.
   - **CARTO Voyager:** needs a [free API key](https://carto.com/basemaps/apikey/).
-  - **OpenStreetMap:** its servers require a `Referer` header, which browsers don't send for pages opened as local files. So it usually works only if you serve the viewer from a web server, including a local one such as `python -m http.server`.
+  - **OpenStreetMap:** its servers require a `Referer` header, which browsers don't send for pages opened as local files. It works in the online copy, or from any web server, including a local one such as `python -m http.server`.
   - **A custom tile URL** of your choice.
 - Settings (units, maps, your My page layout) are stored in your browser's `localStorage`. Your health data is never stored there.
 
@@ -69,8 +69,17 @@ If a column the viewer expects is missing, it falls back to the first numeric co
 ## Limitations
 
 - The whole database is loaded into memory. Exports of several hundred MB take a minute or so and need a few GB of free RAM.
+- The first time a heart-rate chart is shown, the viewer reads every heart-rate sample once to total them per day. With years of per-minute data this can take several seconds. After that, ranges, units and My page edits reuse the totals.
 - Data that an app keeps only inside itself, and doesn't write to Health Connect, isn't in the export. For example, OpenVitals' cycle-journal notes and symptoms need that app's own export.
 - The viewer has been tested against synthetic exports built to the AOSP schema. Reports from real exports are very welcome.
+
+## Performance
+
+- **Query results are remembered:** the export is opened read-only, so anything already looked up is reused when you switch tabs, units or ranges, or edit My page.
+- **Edits redraw only one widget:** changes on My page (move, resize, chart/table view, add, remove) redraw only the widget you changed.
+- **Widgets draw in stages:** each widget shows a placeholder first and is drawn a few at a time, so the page stays responsive.
+
+On a 3-year test export with per-minute heart rate (1.6 million samples), each My page edit takes about 10–30 ms.
 
 ## Building from source
 
@@ -85,8 +94,9 @@ npm run build
 
 ```sh
 pip install playwright && playwright install chromium
-python tests/make_fake_export.py   # writes a random export to tests/out/
+python tests/make_fake_export.py   # writes a random export to tests/out/ (--days, --hr-minutes for bigger ones)
 python tests/test_viewer.py        # set CHROME=/path/to/chrome to use an installed browser
+python tests/perf_mypage.py        # optional: times My page drawing and editing
 ```
 
 The test opens the built file in light and dark mode and fails on any of the following:
@@ -94,7 +104,7 @@ The test opens the built file in light and dark mode and fails on any of the fol
 - a page error
 - an empty tab
 - a missing average line on the scatter plots
-- My page losing its layout after a reload
+- My page losing its layout after a reload, or editing one widget redrawing the others
 - any network request while maps are off
 - any request other than map images while maps are on
 

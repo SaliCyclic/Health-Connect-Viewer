@@ -22,6 +22,11 @@ def tile_png():  # plain 256x256 PNG standing in for a map tile
     ch = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
     return b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", struct.pack(">IIBBBBB", 256, 256, 8, 2, 0, 0, 0)) + ch(b"IDAT", zlib.compress(raw)) + ch(b"IEND", b"")
 
+def settle(page):
+    """Wait until every widget has finished drawing (they draw progressively)."""
+    page.wait_for_timeout(50)
+    page.wait_for_function("() => !document.querySelector('[data-pending]')", timeout=60000)
+
 def main():
     if not os.path.exists(ZIP):
         sys.exit("Run tests/make_fake_export.py first.")
@@ -46,32 +51,36 @@ def main():
 
             for tab in ["Activity", "Heart", "Sleep", "Body", "Vitals", "Nutrition & mind", "Workouts", "All tables & SQL", "My page"]:
                 page.click(f"#tabs button:has-text('{tab}')")
-                page.wait_for_timeout(250)
+                settle(page)
                 n = page.locator("#views .card").count()
                 check(n > 0, f"[{scheme}] {tab}: {n} cards")
                 page.screenshot(path=os.path.join(SHOTS, f"{scheme}_{tab.split()[0].lower()}.png"), full_page=True)
 
             # scatter plots carry an average line
-            page.click("#tabs button:text-is('Sleep')"); page.wait_for_timeout(200)
+            page.click("#tabs button:text-is('Sleep')"); settle(page)
             check(page.locator(".chart svg line[stroke-dasharray='7 4']").count() == 2, f"[{scheme}] bedtime + wake average lines")
 
             # My page: add a table and a custom SQL widget, survive a reload
             page.click("#tabs button:has-text('My page')"); page.click("text=Edit page")
             page.select_option(".picker select", "weight_record_table"); page.click("text=+ Add table")
             page.click("text=+ Custom SQL chart or table"); page.wait_for_timeout(300)
-            page.click("text=Done"); page.wait_for_timeout(200)
-            before = page.locator("#views .grid > .card").count()
+            marker = page.evaluate("() => { const c = document.querySelectorAll('#views .slot > .card'); c[c.length - 1].dataset.marker = '1'; return c.length; }")
+            page.locator(".wctl button[title='Move later']").first.click()
+            page.locator(".wctl select[title=Width]").first.select_option("wide")
+            check(page.locator("[data-marker='1']").count() == 1, f"[{scheme}] editing one widget leaves the others untouched")
+            page.click("text=Done"); settle(page)
+            before = page.locator("#views .grid > .slot > .card").count()
             page.reload(); page.set_input_files("#file", ZIP); page.wait_for_selector("#app:not(.hidden)")
-            page.click("#tabs button:has-text('My page')"); page.wait_for_timeout(300)
-            after = page.locator("#views .grid > .card").count()
+            page.click("#tabs button:has-text('My page')"); settle(page)
+            after = page.locator("#views .grid > .slot > .card").count()
             check(before == after and before >= 7, f"[{scheme}] My page kept {after} widgets after reload")
 
             check(not requests, f"[{scheme}] no network requests with maps off ({len(requests)})")
 
             # maps on: only tile images are requested
-            page.click("#tabs button:text-is('Workouts')"); page.click("tbody tr.click >> nth=0"); page.wait_for_timeout(200)
+            page.click("#tabs button:text-is('Workouts')"); settle(page); page.click("tbody tr.click >> nth=0"); page.wait_for_timeout(200)
             page.click("text=show on a map…"); page.check("#mapsOn"); page.click("#mapsSave"); page.wait_for_timeout(200)
-            page.click("tbody tr.click >> nth=0"); page.wait_for_timeout(1200)
+            settle(page); page.click("tbody tr.click >> nth=0"); page.wait_for_timeout(1200)
             check(page.locator(".map img").count() > 0, f"[{scheme}] map tiles drawn")
             check(all("tile.opentopomap.org" in u for u in requests), f"[{scheme}] only tile requests with maps on")
             page.locator(".map").scroll_into_view_if_needed()
