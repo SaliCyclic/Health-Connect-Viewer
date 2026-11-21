@@ -1,0 +1,41 @@
+name: Release
+
+# Push a tag like v2.0.0 to publish a release with the viewer attached as a download.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Version matches the tag
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::package.json version is $v but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp dist/health-connect-viewer.html "health-connect-viewer-$GITHUB_REF_NAME.html"
+          gh release create "$GITHUB_REF_NAME" "health-connect-viewer-$GITHUB_REF_NAME.html" \
+            --title "Health Connect Viewer $GITHUB_REF_NAME" --generate-notes

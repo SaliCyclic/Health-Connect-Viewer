@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Privacy reminder
+    url: https://github.com/SaliCyclic/Health-Connect-Viewer#privacy
+    about: Never post your Health Connect export or screenshots that show your values. The schema report is enough.

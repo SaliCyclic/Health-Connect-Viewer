@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2a78d6">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<!-- Offline by design: scripts can't make network requests at all (connect-src 'none').
+     The only thing that can ever load from the internet is map images, and only after you turn on online maps.
+     worker-src allows the in-page database worker (blob:) and, in the online copy, the offline-app service worker. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; worker-src blob: 'self'; style-src 'unsafe-inline'; img-src data: blob: https:; manifest-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Health Connect Viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232a78d6'/%3E%3Cpath d='M10 36h10l5-12 8 22 6-14 4 4h11' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<a class="skip" href="#views">Skip to charts</a>
+<header class="top">
+  <h1>Health Connect Viewer</h1>
+  <span class="badge" id="netBadge"></span>
+  <button id="mapsBtn" title="Online maps for workout routes">Maps: off</button>
+  <span class="spacer"></span>
+  <span id="fileinfo" class="badge hidden"></span>
+  <button id="addFiles" class="hidden" title="Add GPX, TCX or FIT workout files, or an OpenVitals cycle-journal backup">Add files</button>
+  <button id="printBtn" class="hidden" title="Print this tab, or save it as a PDF">Print / PDF</button>
+  <button id="openOther" class="hidden">Open another file</button>
+  <button id="settingsBtn" title="Goals, max heart rate, memory use" aria-label="Settings">⚙</button>
+  <button id="themeBtn" title="Toggle light/dark" aria-label="Toggle light or dark theme">◐</button>
+  <input id="addInput" type="file" multiple accept=".gpx,.tcx,.fit,.json,.zip,.db" class="hidden" aria-hidden="true">
+</header>
+<div id="printHead" class="print-only"></div>
+
+<dialog id="mapsDlg" aria-labelledby="mapsTitle">
+  <form method="dialog">
+    <h3 id="mapsTitle">Online maps for workout routes</h3>
+    <label class="switch"><input type="checkbox" id="mapsOn"> Load map images from the internet</label>
+    <p class="note">When this is on, the page downloads map images for the route you're looking at.
+      Those requests tell the map provider which area your route covers, along with your IP address.
+      None of your health data is sent, and everything else stays offline. Turn it off at any time.</p>
+    <label class="field">Map provider
+      <select id="mapsProvider"></select></label>
+    <div id="mapsProvNote" class="note"></div>
+    <label class="field hidden" id="mapsKeyRow">API key <input type="text" id="mapsKey" placeholder="paste your free key"></label>
+    <label class="field hidden" id="mapsCustomRow">Tile URL <input type="text" id="mapsCustom" placeholder="https://example.com/{z}/{x}/{y}.png"></label>
+    <div class="dlg-actions"><button value="cancel">Cancel</button><button class="primary" value="ok" id="mapsSave">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="settingsDlg" aria-labelledby="setTitle">
+  <form method="dialog">
+    <h3 id="setTitle">Settings</h3>
+    <h4>Goals</h4>
+    <p class="note">Shown as a dotted line on the matching charts. Leave a box empty for no goal.</p>
+    <div id="goalFields"></div>
+    <h4>Heart-rate zones</h4>
+    <label class="field row"><span>Max heart rate</span><input type="number" id="maxHrIn" min="100" max="240" step="1" aria-label="Max heart rate"><span class="u">bpm</span></label>
+    <p class="note">Leave empty to estimate it from your highest recorded heart rates.</p>
+    <h4>Memory use</h4>
+    <label class="field">Opening large exports
+      <select id="dbModeSel">
+        <option value="auto">Automatic: low-memory mode for big files when possible</option>
+        <option value="memory">Always in memory (fastest, needs RAM about twice the file size)</option>
+        <option value="disk">Always low-memory mode</option>
+      </select></label>
+    <p class="note">Low-memory mode keeps a temporary copy of the export in this browser's private storage and reads it from there.
+      It's deleted when you open another file, and whenever the viewer starts. Browsers only allow this storage for pages
+      served from a website (like the online copy). When the page is opened as a file, the export is always held in memory.</p>
+    <div class="dlg-actions"><button value="cancel">Cancel</button><button class="primary" value="ok">Save</button></div>
+  </form>
+</dialog>
+
+<main>
+  <section id="start" class="drop">
+    <h2>Open your Health Connect export</h2>
+    <p>Drop <b>Health Connect.zip</b> (or the <b>.db</b> file inside it) here, or</p>
+    <p><button class="primary" id="pick">Choose file…</button>
+      <input id="file" type="file" multiple accept=".zip,.db,.sqlite,application/zip,.gpx,.tcx,.fit,.json" class="hidden" aria-hidden="true"></p>
+    <progress id="progress" class="hidden" aria-label="Opening progress"></progress>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+    <div class="how">
+      <b>Getting the file:</b> on your phone open Settings → search "Health Connect" → Manage data → Backup and restore →
+      Scheduled export. After the first export runs, download the zip from the cloud storage you picked.<br><br>
+      <b>Also accepted:</b> workout files (GPX, TCX, FIT) and an OpenVitals cycle-journal backup (.json). Add them along with the export, or later with "Add files".<br><br>
+      Everything is read inside this browser tab. This page contains everything it needs (database engine included)
+      and is locked so it cannot connect to the internet (unless you turn on online maps for workout routes).
+    </div>
+    <p class="note" style="margin-top:20px">Health Connect Viewer v__VERSION__ · open source (MIT) ·
+      <a href="https://github.com/SaliCyclic/Health-Connect-Viewer" target="_blank" rel="noopener noreferrer">github.com/SaliCyclic/Health-Connect-Viewer</a></p>
+  </section>
+
+  <section id="app" class="hidden">
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections"></nav>
+    <div class="toolbar" id="toolbar">
+      <span>Range</span>
+      <div class="seg" id="rangeSeg" role="group" aria-label="Date range"></div>
+      <form id="customRange" class="hidden custom-range">
+        <input type="date" name="from" aria-label="From"> – <input type="date" name="to" aria-label="To"> <button class="primary">Apply</button>
+      </form>
+      <span id="rangeLabel" class="note"></span>
+      <span class="spacer"></span>
+      <label>Compare <select id="compareSel" aria-label="Compare with">
+        <option value="off">Off</option><option value="prev">Previous period</option><option value="year">Same period last year</option></select></label>
+      <span>Trend</span>
+      <div class="seg" id="trendSeg" role="group" aria-label="Trend line"></div>
+      <span>Units</span>
+      <div class="seg" id="unitSeg" role="group" aria-label="Units"></div>
+    </div>
+    <div id="views" tabindex="-1"></div>
+  </section>
+</main>
+
+<script type="text/plain" id="wasm-b64">__WASM_B64__</script>
+<script type="text/plain" id="worker-src">/*__WORKER__*/</script>
+<script>
+/*__APP__*/
+</script>
+</body>
+</html>

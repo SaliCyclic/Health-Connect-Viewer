@@ -1,0 +1,49 @@
+name: Bug report
+description: A chart looks wrong, a file won't open, or something else isn't working
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never attach your Health Connect export, screenshots with your values, or any other health data.**
+        Issues are public. The schema report below contains only table and column names, which is all we need.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you see instead? Which tab and chart?
+    validations:
+      required: true
+  - type: textarea
+    id: schema
+    attributes:
+      label: Schema report
+      description: |
+        Open your export in the viewer, go to "All tables & SQL", and click "Copy schema report".
+        It lists table and column names only, never values. Paste it here.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Viewer version
+      description: Shown at the bottom of the start screen (for example v2.0.0)
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and operating system
+      placeholder: e.g. Firefox 140 on Windows 11
+  - type: dropdown
+    id: how
+    attributes:
+      label: How did you open the viewer?
+      options:
+        - Downloaded file opened from my computer
+        - Online copy (GitHub Pages)
+        - Installed app (from the online copy)
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I haven't included any health data, export files or screenshots showing my values.
+          required: true

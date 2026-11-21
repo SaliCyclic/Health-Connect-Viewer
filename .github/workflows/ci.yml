@@ -1,0 +1,55 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Committed dist/ matches the source
+        run: |
+          if ! git diff --quiet -- dist; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
+            git diff --stat -- dist
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Test
+        run: |
+          python tests/make_fake_export.py
+          python tests/test_viewer.py
+
+      - name: Keep screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: tests/screenshots/
+          retention-days: 14
