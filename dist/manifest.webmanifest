@@ -1,0 +1,15 @@
+{
+  "name": "Health Connect Viewer",
+  "short_name": "HC Viewer",
+  "description": "Offline dashboard for Android Health Connect exports. Your data never leaves your device.",
+  "start_url": "health-connect-viewer.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f3f0",
+  "theme_color": "#2a78d6",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

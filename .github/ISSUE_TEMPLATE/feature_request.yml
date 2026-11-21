@@ -1,0 +1,14 @@
+name: Feature request
+description: Suggest a chart, a data type or an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: What would you use it for? If it's about a Health Connect data type, name the record type if you know it.
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: Please don't attach health data or export files. Issues are public.

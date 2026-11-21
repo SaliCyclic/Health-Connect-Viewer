@@ -7,6 +7,54 @@ ap.add_argument("--days", type=int, default=420, help="days of history (default 
 ap.add_argument("--hr-minutes", type=int, default=5, help="minutes between heart-rate samples (default 5)")
 ARGS = ap.parse_args()
 
+def make_extra_files(today0):
+    """Sample workout files (GPX, TCX, FIT) and an OpenVitals cycle-journal backup."""
+    import json, struct, datetime
+    start = today0 - 3 * 86400000 + 7 * 3600000   # three days ago, morning (UTC ms)
+    pts = []
+    for i in range(0, 1800, 10):
+        a = i / 1800 * 2 * math.pi
+        pts.append((start + i * 1000, 44.65 + 0.01 * math.sin(a), -63.58 + 0.014 * math.cos(a), 30 + 20 * math.sin(2 * a), int(120 + 30 * math.sin(a))))
+    # cumulative distance along the track, so the files' own distance fields match their GPS points
+    cum = [0.0]
+    for (t0, a0, o0, *_), (t1, a1, o1, *_) in zip(pts, pts[1:]):
+        r = math.radians
+        h = math.sin(r(a1 - a0) / 2) ** 2 + math.cos(r(a0)) * math.cos(r(a1)) * math.sin(r(o1 - o0) / 2) ** 2
+        cum.append(cum[-1] + 2 * 6371000 * math.asin(math.sqrt(h)))
+    iso = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gpx = ['<?xml version="1.0"?><gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1"><trk><name>Morning run</name><type>running</type><trkseg>']
+    gpx += [f'<trkpt lat="{la}" lon="{lo}"><ele>{el:.1f}</ele><time>{iso(t)}</time><extensions><gpxtpx:TrackPointExtension><gpxtpx:hr>{hr}</gpxtpx:hr></gpxtpx:TrackPointExtension></extensions></trkpt>' for t, la, lo, el, hr in pts]
+    gpx.append("</trkseg></trk></gpx>")
+    open(os.path.join(OUT, "morning-run.gpx"), "w").write("\n".join(gpx))
+    s2 = start - 86400000
+    tcx = ['<?xml version="1.0"?><TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"><Activities><Activity Sport="Biking"><Id>x</Id><Lap><Track>']
+    tcx += [f'<Trackpoint><Time>{iso(t - start + s2)}</Time><Position><LatitudeDegrees>{la}</LatitudeDegrees><LongitudeDegrees>{lo}</LongitudeDegrees></Position><AltitudeMeters>{el:.1f}</AltitudeMeters><DistanceMeters>{cum[i]:.1f}</DistanceMeters><HeartRateBpm><Value>{hr}</Value></HeartRateBpm></Trackpoint>' for i, (t, la, lo, el, hr) in enumerate(pts)]
+    tcx.append("</Track></Lap></Activity></Activities></TrainingCenterDatabase>")
+    open(os.path.join(OUT, "bike.tcx"), "w").write("\n".join(tcx))
+    # FIT: definition + data messages for 'record' (20) and 'session' (18)
+    FIT_EPOCH = 631065600
+    s3 = start - 2 * 86400000
+    body = bytearray()
+    body += bytes([0x40, 0, 0]) + struct.pack("<H", 20) + bytes([6]) + bytes([253, 4, 0x86, 0, 4, 0x85, 1, 4, 0x85, 2, 2, 0x84, 3, 1, 0x02, 5, 4, 0x86])
+    semi = 2 ** 31 / 180
+    for i, (t, la, lo, el, hr) in enumerate(pts):
+        ts = (t - start + s3) // 1000 - FIT_EPOCH
+        body += bytes([0x00]) + struct.pack("<IiiHBI", ts, int(la * semi), int(lo * semi), int((el + 500) * 5), hr, int(cum[i] * 100))
+    body += bytes([0x41, 0, 0]) + struct.pack("<H", 18) + bytes([5]) + bytes([253, 4, 0x86, 2, 4, 0x86, 5, 1, 0x00, 7, 4, 0x86, 9, 4, 0x86])
+    st3 = s3 // 1000 - FIT_EPOCH
+    body += bytes([0x01]) + struct.pack("<IIBII", st3 + 1800, st3, 1, 1800 * 1000, int(cum[-1] * 100))
+    header = struct.pack("<BBHI4sH", 14, 0x20, 2132, len(body), b".FIT", 0)
+    open(os.path.join(OUT, "watch-run.fit"), "wb").write(header + body + b"\x00\x00")
+    # OpenVitals cycle journal (format 1)
+    ents = []
+    for k in range(60):
+        d = datetime.date.fromtimestamp(today0 / 1000) - datetime.timedelta(days=k * 2)
+        ents.append({"date": d.isoformat(), "bleedingNone": False, "pain": random.randint(1, 5), "mood": random.randint(1, 5), "energy": random.randint(1, 5),
+                     "symptoms": random.sample(["cramps", "headache", "bloating", "fatigue", "acne", "mood_changes"], random.randint(0, 3)),
+                     "notes": "Felt tired" if k % 9 == 0 else "", "disturbances": [], "updatedAt": today0})
+    json.dump({"format": 1, "exportedAt": today0, "entries": sorted(ents, key=lambda e: e["date"]), "exclusions": [], "profile": {"contexts": []}},
+              open(os.path.join(OUT, "openvitals-cycle-journal.json"), "w"), indent=1)
+
 random.seed(4)
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -54,6 +102,11 @@ instant("oxygen_saturation_record_table", "percentage REAL")
 instant("respiratory_rate_record_table", "rate REAL")
 instant("vo2_max_record_table", "measurement_method INTEGER, vo2_milliliters_per_minute_kilogram REAL")
 x("CREATE TABLE preference_table (key TEXT, value TEXT)")
+# the user's app priority per data category (activity: watch first, then Fit)
+x("CREATE TABLE health_data_category_priority_table (row_id INTEGER PRIMARY KEY AUTOINCREMENT, health_data_category INTEGER UNIQUE, app_id_priority_order TEXT NOT NULL)")
+x("INSERT INTO health_data_category_priority_table (health_data_category, app_id_priority_order) VALUES (1, '3,1'), (5, '3,1')")
+interval("menstruation_period_record_table", "dummy INTEGER")
+instant("menstruation_flow_record_table", "flow INTEGER")
 
 TZ = -4 * 3600  # Halifax, seconds
 DAY = 86400000
@@ -120,6 +173,9 @@ for d in range(N, -1, -1):
     st = day0 - 3600000 * random.uniform(0.5, 1.5)
     en = day0 + 3600000 * random.uniform(6.2, 7.8)
     sid = ins("sleep_session_record_table", base_i, [uuid.uuid4().bytes, en, 3, int(st), TZ, int(en), TZ])
+    # the phone app (Fit) logs most of the same nights too, slightly shorter: must not be double counted
+    if random.random() < 0.7:
+        ins("sleep_session_record_table", base_i, [uuid.uuid4().bytes, en, 1, int(st + 600000), TZ, int(en - 300000), TZ])
     tcur = st
     while tcur < en:
         stg = random.choices([4, 5, 6, 1], [50, 20, 22, 8])[0]
@@ -144,6 +200,13 @@ for d in range(N, -1, -1):
                 r = 0.012 * (1 + 0.3 * math.sin(i / n * 6 * math.pi))
                 pts.append((eid, st + i * 5000, lat + r * math.sin(a), lon + r * 1.4 * math.cos(a) - 0.0168 * math.cos(ang), 20 + 15 * math.sin(i / n * 4 * math.pi), 5, 5))
             c.executemany("INSERT INTO exercise_route_table VALUES (?,?,?,?,?,?,?)", pts)
+# periods every ~28-31 days, 5 days long, with flow records
+pd = today0 - N * DAY + 3 * DAY
+while pd < today0:
+    ins("menstruation_period_record_table", base_i, [uuid.uuid4().bytes, pd, 2, pd, TZ, pd + 5 * DAY - 1, TZ])
+    for k, f in enumerate([2, 3, 2, 1, 1]):
+        ins("menstruation_flow_record_table", base_t + ["flow"], [uuid.uuid4().bytes, pd, 2, pd + k * DAY + 8 * 3600000, TZ, f])
+    pd += random.randint(27, 31) * DAY
 x("INSERT INTO height_record_table (uuid,last_modified_time,app_info_id,time,zone_offset,height) VALUES (?,?,?,?,?,?)", (uuid.uuid4().bytes, today0, 2, today0 - 300 * DAY, TZ, 1.78))
 c.commit()
 c.close()
@@ -151,3 +214,4 @@ zp = os.path.join(OUT, "Health Connect.zip")
 with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
     z.write(db_path, "health_connect_export.db")
 print(os.path.getsize(db_path), os.path.getsize(zp))
+make_extra_files(today0)

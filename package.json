@@ -1,6 +1,6 @@
 {
   "name": "health-connect-viewer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Offline, single-file dashboard for Android Health Connect exports. Your data never leaves your computer.",
   "homepage": "https://github.com/SaliCyclic/Health-Connect-Viewer",
@@ -14,7 +14,7 @@
     "build": "node scripts/build.mjs"
   },
   "devDependencies": {
-    "fflate": "0.8.3",
-    "sql.js": "1.17.0"
+    "@sqlite.org/sqlite-wasm": "3.54.1-build1",
+    "fflate": "0.8.3"
   }
 }
