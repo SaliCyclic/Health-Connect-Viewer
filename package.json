@@ -1,0 +1,20 @@
+{
+  "name": "health-connect-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline, single-file dashboard for Android Health Connect exports. Your data never leaves your computer.",
+  "homepage": "https://github.com/SaliCyclic/Health-Connect-Viewer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SaliCyclic/Health-Connect-Viewer.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "fflate": "0.8.3",
+    "sql.js": "1.17.0"
+  }
+}

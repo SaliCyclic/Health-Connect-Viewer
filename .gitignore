@@ -1,0 +1,7 @@
+node_modules/
+tests/out/
+tests/screenshots/
+__pycache__/
+*.db
+*.zip
+.DS_Store
