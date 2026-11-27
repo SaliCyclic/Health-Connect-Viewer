@@ -1,6 +1,6 @@
 # Health Connect Viewer
 
-An offline dashboard for your Android **Health Connect** export. It's a single HTML file: open it in your browser, drop in your export, and explore steps, heart rate, sleep, weight, vitals, nutrition, workouts and cycles. You can build your own dashboard page and print it as a report.
+An offline dashboard for your Android **Health Connect** export. To use: Open the html file in your browser, and drop in your export. You can view steps, heart rate, sleep, weight, vitals, nutrition, workouts and cycles as well as build your own dashboard page and print it as a report.
 
 **Your health data never leaves your device.** The file contains everything it needs, including the SQLite database engine, and a built-in security policy stops it from sending anything over the network. The only exception is optional map images for workout routes, which stay off until you turn them on (see [Privacy](#privacy)).
 
